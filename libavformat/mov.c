@@ -4096,13 +4096,16 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     if (st->discard != AVDISCARD_ALL) {
         if (avio_seek(sc->pb, sample->pos, SEEK_SET) != sample->pos) {
-            av_log(mov->fc, AV_LOG_ERROR, "stream %d, offset 0x%"PRIx64": partial file\n",
-                   sc->ffindex, sample->pos);
+            av_log(mov->fc, AV_LOG_ERROR, "stream %d, offset 0x%"PRIx64": partial file (%x)\n",
+                   sc->ffindex, sample->pos, ret);
+            sc->current_sample--;
             return AVERROR_INVALIDDATA;
         }
         ret = av_get_packet(sc->pb, pkt, sample->size);
-        if (ret < 0)
+        if (ret < 0) {
+            sc->current_sample--;
             return ret;
+        }
         if (sc->has_palette) {
             uint8_t *pal;
 
