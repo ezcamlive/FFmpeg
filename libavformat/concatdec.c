@@ -279,26 +279,31 @@ static int open_file(AVFormatContext *avf, unsigned fileno)
 {
     ConcatContext *cat = avf->priv_data;
     ConcatFile *file = &cat->files[fileno];
+    AVFormatContext *new_avf = NULL;
     int ret;
+
+    new_avf = avformat_alloc_context();
+    if (!new_avf)
+        return AVERROR(ENOMEM);
+
+    new_avf->interrupt_callback = avf->interrupt_callback;
+
+    if ((ret = ff_copy_whitelists(new_avf, avf)) < 0) {
+        avformat_close_input(&new_avf);
+        return ret;
+    }
+
+    if ((ret = avformat_open_input(&new_avf, file->url, NULL, NULL)) < 0 ||
+        (ret = avformat_find_stream_info(new_avf, NULL)) < 0) {
+        av_log(avf, AV_LOG_ERROR, "Impossible to open '%s'\n", file->url);
+        avformat_close_input(&new_avf);
+        return AVERROR_EOF;
+    }
 
     if (cat->avf)
         avformat_close_input(&cat->avf);
 
-    cat->avf = avformat_alloc_context();
-    if (!cat->avf)
-        return AVERROR(ENOMEM);
-
-    cat->avf->interrupt_callback = avf->interrupt_callback;
-
-    if ((ret = ff_copy_whitelists(cat->avf, avf)) < 0)
-        return ret;
-
-    if ((ret = avformat_open_input(&cat->avf, file->url, NULL, NULL)) < 0 ||
-        (ret = avformat_find_stream_info(cat->avf, NULL)) < 0) {
-        av_log(avf, AV_LOG_ERROR, "Impossible to open '%s'\n", file->url);
-        avformat_close_input(&cat->avf);
-        return ret;
-    }
+    cat->avf      = new_avf;
     cat->cur_file = file;
     if (file->start_time == AV_NOPTS_VALUE)
         file->start_time = !fileno ? 0 :
