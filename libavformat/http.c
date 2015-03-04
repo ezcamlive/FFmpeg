@@ -889,6 +889,9 @@ static int http_buf_read(URLContext *h, uint8_t *buf, int size)
         if (s->chunksize > 0)
             s->chunksize -= len;
     }
+
+    av_log(s, AV_LOG_WARNING, "HTTP offset %lld %lld %lld\n", s->off, s->end_off, s->filesize);
+
     return len;
 }
 
