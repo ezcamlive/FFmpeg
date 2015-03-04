@@ -883,6 +883,13 @@ static int http_buf_read(URLContext *h, uint8_t *buf, int size)
         }
         if (len > 0)
             len = ffurl_read(s->hd, buf, len);
+
+        if (len <= 0) {
+            av_log(s, AV_LOG_WARNING, "Flow Broken!!! need reconnect!! len %d \n",len);
+            av_log(s, AV_LOG_WARNING, "HTTP offset %lld %lld %lld\n", s->off, s->end_off, s->filesize);
+            av_log(s, AV_LOG_WARNING, "Flow Broken!!! log over!! \n");
+        }
+
     }
     if (len > 0) {
         s->off += len;
