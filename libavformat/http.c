@@ -129,6 +129,7 @@ static const AVOption options[] = {
 static int http_connect(URLContext *h, const char *path, const char *local_path,
                         const char *hoststr, const char *auth,
                         const char *proxyauth, int *new_location);
+static int http_close(URLContext *h);
 
 void ff_http_init_auth_state(URLContext *dest, const URLContext *src)
 {
@@ -149,7 +150,7 @@ static int http_open_cnx_internal(URLContext *h, AVDictionary **options)
     char buf[1024], urlbuf[MAX_URL_SIZE];
     int port, use_proxy, err, location_changed = 0;
     HTTPContext *s = h->priv_data;
-
+    av_log(h, AV_LOG_WARNING,"s offset 123 →_→ %lld \n", s->off);
     av_url_split(proto, sizeof(proto), auth, sizeof(auth),
                  hostname, sizeof(hostname), &port,
                  path1, sizeof(path1), s->location);
@@ -188,9 +189,19 @@ static int http_open_cnx_internal(URLContext *h, AVDictionary **options)
     if (!s->hd) {
         err = ffurl_open(&s->hd, buf, AVIO_FLAG_READ_WRITE,
                          &h->interrupt_callback, options);
-        if (err < 0)
+        av_log(h, AV_LOG_WARNING,"s offset 456 error →_→ %lld \n", err);
+        if (err < 0) {
+            av_log(h, AV_LOG_WARNING,"s offset 789 error →_→ %lld \n", err);
             return err;
+        }
     }
+
+
+    av_log(s, AV_LOG_WARNING, "h path %s  off  %lld \n", path, s->off);
+    av_log(s, AV_LOG_WARNING, "h local path %s \n", local_path);
+    av_log(s, AV_LOG_WARNING, "h hoststr %s \n", hoststr);
+    av_log(s, AV_LOG_WARNING, "h auth %s \n", auth);
+    av_log(s, AV_LOG_WARNING, "h proxyauth %s \n", proxyauth);
 
     err = http_connect(h, path, local_path, hoststr,
                        auth, proxyauth, &location_changed);
@@ -207,11 +218,16 @@ static int http_open_cnx(URLContext *h, AVDictionary **options)
     HTTPContext *s = h->priv_data;
     int location_changed, attempts = 0, redirects = 0;
 redo:
+    av_log(h, AV_LOG_WARNING,"copy complete options count %d  \n", av_dict_count(s->chained_options));
+    av_log(h, AV_LOG_WARNING, "http_open_cnx redo h: %x s: %x s's option %x \n", h, s ,s->chained_options);
     av_dict_copy(options, s->chained_options, 0);
 
+    av_log(h, AV_LOG_WARNING,"copy complete options count %d chained_options count %d \n", av_dict_count(s->chained_options), av_dict_count(*options));
     cur_auth_type       = s->auth_state.auth_type;
     cur_proxy_auth_type = s->auth_state.auth_type;
-
+    
+    av_log(h, AV_LOG_WARNING,"s offset →_→ %lld \n", s->off);
+    
     location_changed = http_open_cnx_internal(h, options);
     if (location_changed < 0)
         goto fail;
@@ -749,6 +765,9 @@ static int http_connect(URLContext *h, const char *path, const char *local_path,
     // Note: we send this on purpose even when s->off is 0 when we're probing,
     // since it allows us to detect more reliably if a (non-conforming)
     // server supports seeking by analysing the reply headers.
+    av_log(h, AV_LOG_WARNING, "connection headers %s \n", s->headers);
+    av_log(h, AV_LOG_WARNING, "range debug %lld %lld %lld \n", post, s->end_off, s->off);
+
     if (!has_header(s->headers, "\r\nRange: ") && !post && (s->off > 0 || s->end_off || s->seekable == -1)) {
         len += av_strlcatf(headers + len, sizeof(headers) - len,
                            "Range: bytes=%"PRId64"-", s->off);
@@ -860,6 +879,24 @@ done:
     return err;
 }
 
+static int http_reconnect(URLContext *h)
+{
+    AVDictionary *options = NULL;
+    HTTPContext* s = h->priv_data;
+    int64_t offset = s->off;
+    //int ret = http_close(h);
+    s = h->priv_data;
+    s->off = offset;
+    s->hd = NULL;
+    //av_log(h, AV_LOG_WARNING, "re close http cnt result %d \n",ret);
+    int ret = http_open_cnx(h, &options);
+    av_log(h, AV_LOG_WARNING, "re open http cnt result %d \n",ret);
+    if (ret != 0) {
+         av_dict_free(&options);
+    }
+    return ret;
+}
+
 static int http_buf_read(URLContext *h, uint8_t *buf, int size)
 {
     HTTPContext *s = h->priv_data;
@@ -886,8 +923,11 @@ static int http_buf_read(URLContext *h, uint8_t *buf, int size)
 
         if (len <= 0) {
             av_log(s, AV_LOG_WARNING, "Flow Broken!!! need reconnect!! len %d \n",len);
+            http_reconnect(h);
+            //len = ffurl_read(s->hd, buf, len);
             av_log(s, AV_LOG_WARNING, "HTTP offset %lld %lld %lld\n", s->off, s->end_off, s->filesize);
-            av_log(s, AV_LOG_WARNING, "Flow Broken!!! log over!! \n");
+            av_log(s, AV_LOG_WARNING, "Flow Broken!!! log over!! len %d \n", len);
+
         }
 
     }
@@ -897,7 +937,7 @@ static int http_buf_read(URLContext *h, uint8_t *buf, int size)
             s->chunksize -= len;
     }
 
-    av_log(s, AV_LOG_WARNING, "HTTP offset %lld %lld %lld\n", s->off, s->end_off, s->filesize);
+   // av_log(s, AV_LOG_WARNING, "HTTP offset %lld %lld %lld\n", s->off, s->end_off, s->filesize);
 
     return len;
 }
