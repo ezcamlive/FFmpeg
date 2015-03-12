@@ -967,7 +967,7 @@ static int http_read_stream(URLContext *h, uint8_t *buf, int size)
         return http_buf_read_compressed(h, buf, size);
 #endif /* CONFIG_ZLIB */
     read_ret = http_buf_read(h, buf, size);
-    if (read_ret < 0 && s->reconnect && !h->is_streamed && s->filesize > 0 && s->off < s->filesize) {
+    if (read_ret < 0 && !h->is_streamed && s->filesize > 0 && s->off < s->filesize) {
         av_log(h, AV_LOG_INFO, "Will reconnect at %"PRId64".\n", s->off);
         seek_ret = http_seek_internal(h, s->off, SEEK_SET, 1);
         if (seek_ret != s->off) {
