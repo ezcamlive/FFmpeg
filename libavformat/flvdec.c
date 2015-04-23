@@ -733,33 +733,53 @@ static void clear_index_entries(AVFormatContext *s, int64_t pos)
 
 static int amf_skip_tag(AVIOContext *pb, AMFDataType type)
 {
-    int nb = -1, ret, parse_name = 1;
+    int nb = -1, ret, parse_name = 1, len;
 
     switch (type) {
     case AMF_DATA_TYPE_NUMBER:
-        avio_skip(pb, 8);
+        ret = avio_skip(pb, 8);
+        if (ret < 0)
+            return ret;
         break;
     case AMF_DATA_TYPE_BOOL:
-        avio_skip(pb, 1);
+        ret = avio_skip(pb, 1);
+        if (ret < 0)
+            return ret;
         break;
     case AMF_DATA_TYPE_STRING:
-        avio_skip(pb, avio_rb16(pb));
+        len = avio_strict_rb16(pb, &ret);
+        if (ret < 0)
+            return ret;
+        ret = avio_skip(pb, len);
+        if (ret < 0)
+            return ret;
         break;
     case AMF_DATA_TYPE_ARRAY:
         parse_name = 0;
     case AMF_DATA_TYPE_MIXEDARRAY:
-        nb = avio_rb32(pb);
+        nb = avio_strict_rb32(pb, &ret);
+        if (ret < 0)
+            return ret;
     case AMF_DATA_TYPE_OBJECT:
         while(!pb->eof_reached && (nb-- > 0 || type != AMF_DATA_TYPE_ARRAY)) {
             if (parse_name) {
-                int size = avio_rb16(pb);
+                int size = avio_strict_rb16(pb, &ret);
+                if (ret < 0)
+                    return ret;
                 if (!size) {
-                    avio_skip(pb, 1);
+                    ret = avio_skip(pb, 1);
+                    if (ret < 0)
+                        return ret;
                     break;
                 }
-                avio_skip(pb, size);
+                ret = avio_skip(pb, size);
+                if (ret < 0)
+                    return ret;
             }
-            if ((ret = amf_skip_tag(pb, avio_r8(pb))) < 0)
+            len = avio_strict_r8(pb, &ret);
+            if (ret < 0)
+                return ret;
+            if ((ret = amf_skip_tag(pb, len)) < 0)
                 return ret;
         }
         break;
