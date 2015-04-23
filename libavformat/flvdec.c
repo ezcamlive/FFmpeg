@@ -871,7 +871,7 @@ skip:
 static int flv_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     FLVContext *flv = s->priv_data;
-    int ret, i, type, size, flags;
+    int ret = 0, i, type, size, flags, skip_ret;
     int stream_type=-1;
     int64_t next, pos, meta_pos;
     int64_t dts, pts = AV_NOPTS_VALUE;
@@ -880,16 +880,21 @@ static int flv_read_packet(AVFormatContext *s, AVPacket *pkt)
     AVStream *st    = NULL;
 
     /* pkt size is repeated at end. skip it */
-    for (;; avio_skip(s->pb, 4)) {
+    for (;; ret = avio_skip(s->pb, 4)) {
+        if (ret < 0)
+            return ret;
+
         pos  = avio_tell(s->pb);
-        type = (avio_r8(s->pb) & 0x1F);
-        size = avio_rb24(s->pb);
-        dts  = avio_rb24(s->pb);
-        dts |= avio_r8(s->pb) << 24;
+        type = (avio_strict_r8(s->pb, &ret) & 0x1F); if (ret < 0) return ret;
+        size = avio_strict_rb24(s->pb, &ret);        if (ret < 0) return ret;
+        dts  = avio_strict_rb24(s->pb, &ret);        if (ret < 0) return ret;
+        dts |= avio_strict_r8(s->pb, &ret) << 24;    if (ret < 0) return ret;
         av_dlog(s, "type:%d, size:%d, dts:%"PRId64" pos:%"PRId64"\n", type, size, dts, avio_tell(s->pb));
         if (avio_feof(s->pb))
             return AVERROR_EOF;
-        avio_skip(s->pb, 3); /* stream id, always 0 */
+        ret = avio_skip(s->pb, 3); /* stream id, always 0 */
+        if (ret < 0)
+            return ret;
         flags = 0;
 
         if (flv->validate_next < flv->validate_count) {
@@ -915,11 +920,15 @@ static int flv_read_packet(AVFormatContext *s, AVPacket *pkt)
 
         if (type == FLV_TAG_TYPE_AUDIO) {
             stream_type = FLV_STREAM_TYPE_AUDIO;
-            flags    = avio_r8(s->pb);
+            flags    = avio_strict_r8(s->pb, &ret);
+            if (ret < 0)
+                goto skip;
             size--;
         } else if (type == FLV_TAG_TYPE_VIDEO) {
             stream_type = FLV_STREAM_TYPE_VIDEO;
-            flags    = avio_r8(s->pb);
+            flags    = avio_strict_r8(s->pb, &ret);
+            if (ret < 0)
+                goto skip;
             size--;
             if ((flags & FLV_VIDEO_FRAMETYPE_MASK) == FLV_FRAME_VIDEO_INFO_CMD)
                 goto skip;
@@ -930,7 +939,8 @@ static int flv_read_packet(AVFormatContext *s, AVPacket *pkt)
                 if (flv_read_metabody(s, next) <= 0) {
                     goto skip;
                 }
-                avio_seek(s->pb, meta_pos, SEEK_SET);
+                if (avio_seek(s->pb, meta_pos, SEEK_SET) < 0)
+                    goto skip;
             }
         } else {
             av_log(s, AV_LOG_DEBUG,
@@ -979,7 +989,8 @@ skip:
             ||(st->discard >= AVDISCARD_BIDIR  &&  ((flags & FLV_VIDEO_FRAMETYPE_MASK) == FLV_FRAME_DISP_INTER && (stream_type == FLV_STREAM_TYPE_VIDEO)))
             || st->discard >= AVDISCARD_ALL
         ) {
-            avio_seek(s->pb, next, SEEK_SET);
+            if ((ret = avio_seek(s->pb, next, SEEK_SET)) < 0)
+                return ret;
             continue;
         }
         break;
@@ -988,20 +999,27 @@ skip:
     // if not streamed and no duration from metadata then seek to end to find
     // the duration from the timestamps
     if (s->pb->seekable && (!s->duration || s->duration == AV_NOPTS_VALUE) && !flv->searched_for_end) {
-        int size;
+        int size, body_size;
         const int64_t pos   = avio_tell(s->pb);
         // Read the last 4 bytes of the file, this should be the size of the
         // previous FLV tag. Use the timestamp of its payload as duration.
         int64_t fsize       = avio_size(s->pb);
 retry_duration:
-        avio_seek(s->pb, fsize - 4, SEEK_SET);
-        size = avio_rb32(s->pb);
+        if ((ret = avio_seek(s->pb, fsize - 4, SEEK_SET)) < 0)
+            return ret;
+        size = avio_strict_rb32(s->pb, &ret);
+        if (ret < 0)
+            return ret;
         // Seek to the start of the last FLV tag at position (fsize - 4 - size)
         // but skip the byte indicating the type.
-        avio_seek(s->pb, fsize - 3 - size, SEEK_SET);
-        if (size == avio_rb24(s->pb) + 11) {
-            uint32_t ts = avio_rb24(s->pb);
-            ts         |= avio_r8(s->pb) << 24;
+        if ((ret = avio_seek(s->pb, fsize - 3 - size, SEEK_SET)) < 0)
+            return ret;
+        body_size = avio_strict_rb24(s->pb, &ret);
+        if (ret < 0)
+            return ret;
+        if (size == body_size + 11) {
+            uint32_t ts = avio_strict_rb24(s->pb, &ret);     if (ret < 0) return ret;
+            ts         |= avio_strict_r8(s->pb, &ret) << 24; if (ret < 0) return ret;
             if (ts)
                 s->duration = ts * (int64_t)AV_TIME_BASE / 1000;
             else if (fsize >= 8 && fsize - 8 >= size) {
@@ -1010,7 +1028,8 @@ retry_duration:
             }
         }
 
-        avio_seek(s->pb, pos, SEEK_SET);
+        if ((ret = avio_seek(s->pb, pos, SEEK_SET)) < 0)
+            return ret;
         flv->searched_for_end = 1;
     }
 
@@ -1052,11 +1071,15 @@ retry_duration:
     if (st->codec->codec_id == AV_CODEC_ID_AAC ||
         st->codec->codec_id == AV_CODEC_ID_H264 ||
         st->codec->codec_id == AV_CODEC_ID_MPEG4) {
-        int type = avio_r8(s->pb);
+        int type = avio_strict_r8(s->pb, &ret);
+        if (ret < 0)
+            return ret;
         size--;
         if (st->codec->codec_id == AV_CODEC_ID_H264 || st->codec->codec_id == AV_CODEC_ID_MPEG4) {
             // sign extension
-            int32_t cts = (avio_rb24(s->pb) + 0xff800000) ^ 0xff800000;
+            int32_t cts = (avio_strict_rb24(s->pb, &ret) + 0xff800000) ^ 0xff800000;
+            if (ret < 0)
+                return ret;
             pts = dts + cts;
             if (cts < 0) { // dts might be wrong
                 if (!flv->wrong_dts)
@@ -1144,7 +1167,8 @@ retry_duration:
         pkt->flags |= AV_PKT_FLAG_KEY;
 
 leave:
-    avio_skip(s->pb, 4);
+    if ((skip_ret = avio_skip(s->pb, 4)) < 0)
+        return skip_ret;
     return ret;
 }
 
