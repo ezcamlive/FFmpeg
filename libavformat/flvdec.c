@@ -651,10 +651,13 @@ static int flv_read_metabody(AVFormatContext *s, int64_t next_pos)
 
 static int flv_read_header(AVFormatContext *s)
 {
-    int offset, flags;
+    int offset, flags, ret;
 
-    avio_skip(s->pb, 4);
-    flags = avio_r8(s->pb);
+    if ((ret = avio_skip(s->pb, 4)) < 0)
+        return ret;
+    flags = avio_strict_r8(s->pb, &ret);
+    if (ret < 0)
+        return ret;
 
     s->ctx_flags |= AVFMTCTX_NOHEADER;
 
@@ -667,9 +670,13 @@ static int flv_read_header(AVFormatContext *s)
     // Flag doesn't indicate whether or not there is script-data present. Must
     // create that stream if it's encountered.
 
-    offset = avio_rb32(s->pb);
-    avio_seek(s->pb, offset, SEEK_SET);
-    avio_skip(s->pb, 4);
+    offset = avio_strict_rb32(s->pb, &ret);
+    if (ret < 0)
+        return ret;
+    if ((ret = avio_seek(s->pb, offset, SEEK_SET)) < 0)
+        return ret;
+    if ((ret = avio_skip(s->pb, 4)) < 0)
+        return ret;
 
     s->start_time = 0;
 
