@@ -239,6 +239,7 @@ static int flv_same_video_codec(AVCodecContext *vcodec, int flags)
 static int flv_set_video_codec(AVFormatContext *s, AVStream *vstream,
                                int flv_codecid, int read)
 {
+    int ret;
     AVCodecContext *vcodec = vstream->codec;
     switch (flv_codecid) {
     case FLV_CODECID_H263:
@@ -263,9 +264,11 @@ static int flv_set_video_codec(AVFormatContext *s, AVStream *vstream,
                 ff_alloc_extradata(vcodec, 1);
             }
             if (vcodec->extradata)
-                vcodec->extradata[0] = avio_r8(s->pb);
+                vcodec->extradata[0] = avio_strict_r8(s->pb, &ret);
             else
-                avio_skip(s->pb, 1);
+                ret = avio_skip(s->pb, 1);
+            if (ret < 0)
+                return ret;
         }
         return 1;     // 1 byte body size adjustment for flv_read_packet()
     case FLV_CODECID_H264:
@@ -392,6 +395,7 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
     AMFDataType amf_type;
     char str_val[1024];
     double num_val;
+    int ret;
 
     num_val  = 0;
     ioc      = s->pb;
@@ -488,7 +492,8 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
                     st->codec->codec_id = AV_CODEC_ID_TEXT;
                 } else if (flv->trust_metadata) {
                     if (!strcmp(key, "videocodecid") && vcodec) {
-                        flv_set_video_codec(s, vstream, num_val, 0);
+                        if ((ret = flv_set_video_codec(s, vstream, num_val, 0)) < 0)
+                            return ret;
                     } else if (!strcmp(key, "audiocodecid") && acodec) {
                         int id = ((int)num_val) << FLV_AUDIO_CODECID_OFFSET;
                         flv_set_audio_codec(s, astream, acodec, id);
@@ -949,7 +954,9 @@ retry_duration:
             sample_rate = ctx.sample_rate;
         }
     } else if (stream_type == FLV_STREAM_TYPE_VIDEO) {
-        size -= flv_set_video_codec(s, st, flags & FLV_VIDEO_CODECID_MASK, 1);
+        if ((ret = flv_set_video_codec(s, st, flags & FLV_VIDEO_CODECID_MASK, 1)) < 0)
+            return ret;
+        size -= ret;
     }
 
     if (st->codec->codec_id == AV_CODEC_ID_AAC ||
