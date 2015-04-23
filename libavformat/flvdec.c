@@ -415,17 +415,24 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
     char str_val[1024];
     double num_val;
     int ret;
+    int amf_end;
 
     num_val  = 0;
     ioc      = s->pb;
-    amf_type = avio_r8(ioc);
+    amf_type = avio_strict_r8(ioc, &ret);
+    if (ret < 0)
+        return ret;
 
     switch (amf_type) {
     case AMF_DATA_TYPE_NUMBER:
-        num_val = av_int2double(avio_rb64(ioc));
+        num_val = av_int2double(avio_strict_rb64(ioc, &ret));
+        if (ret < 0)
+            return ret;
         break;
     case AMF_DATA_TYPE_BOOL:
-        num_val = avio_r8(ioc);
+        num_val = avio_strict_r8(ioc, &ret);
+        if (ret < 0)
+            return ret;
         break;
     case AMF_DATA_TYPE_STRING:
         if (amf_get_string(ioc, str_val, sizeof(str_val)) < 0) {
@@ -454,7 +461,10 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
                                  depth + 1) < 0)
                 return -1;     // if we couldn't skip, bomb out.
         }
-        if (avio_r8(ioc) != AMF_END_OF_OBJECT) {
+        amf_end = avio_strict_r8(ioc, &ret);
+        if (ret < 0)
+            return ret;
+        if (amf_end != AMF_END_OF_OBJECT) {
             av_log(s, AV_LOG_ERROR, "Missing AMF_END_OF_OBJECT in AMF_DATA_TYPE_OBJECT\n");
             return -1;
         }
@@ -464,7 +474,8 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
     case AMF_DATA_TYPE_UNSUPPORTED:
         break;     // these take up no additional space
     case AMF_DATA_TYPE_MIXEDARRAY:
-        avio_skip(ioc, 4);     // skip 32-bit max array index
+        if ((ret = avio_skip(ioc, 4)) < 0)     // skip 32-bit max array index
+            return ret;
         while (avio_tell(ioc) < max_pos - 2) {
             if (amf_get_string(ioc, str_val, sizeof(str_val)) <= 0)
                 return -1;
@@ -474,7 +485,10 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
                                  depth + 1) < 0)
                 return -1;
         }
-        if (avio_r8(ioc) != AMF_END_OF_OBJECT) {
+        amf_end = avio_strict_r8(ioc, &ret);
+        if (ret < 0)
+            return ret;
+        if (amf_end != AMF_END_OF_OBJECT) {
             av_log(s, AV_LOG_ERROR, "Missing AMF_END_OF_OBJECT in AMF_DATA_TYPE_MIXEDARRAY\n");
             return -1;
         }
@@ -483,7 +497,9 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
     {
         unsigned int arraylen, i;
 
-        arraylen = avio_rb32(ioc);
+        arraylen = avio_strict_rb32(ioc, &ret);
+        if (ret < 0)
+            return ret;
         for (i = 0; i < arraylen && avio_tell(ioc) < max_pos - 1; i++)
             if (amf_parse_object(s, NULL, NULL, NULL, max_pos,
                                  depth + 1) < 0)
@@ -491,7 +507,8 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
     }
     break;
     case AMF_DATA_TYPE_DATE:
-        avio_skip(ioc, 8 + 2);  // timestamp (double) and UTC offset (int16)
+        if ((ret = avio_skip(ioc, 8 + 2)) < 0)  // timestamp (double) and UTC offset (int16)
+            return ret;
         break;
     default:                    // unsupported type, we couldn't skip
         av_log(s, AV_LOG_ERROR, "unsupported amf type %d\n", amf_type);
