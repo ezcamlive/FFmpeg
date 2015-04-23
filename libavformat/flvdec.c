@@ -315,7 +315,6 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc,
     int64_t *times         = NULL;
     int64_t *filepositions = NULL;
     int ret                = AVERROR(ENOSYS);
-    int64_t initial_pos    = avio_tell(ioc);
 
     if (vstream->nb_index_entries>0) {
         av_log(s, AV_LOG_WARNING, "Skipping duplicate index\n");
@@ -328,6 +327,7 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc,
     while (avio_tell(ioc) < max_pos - 2) {
         int64_t **current_array;
         unsigned int arraylen;
+        int amf_type;
 
         if ((ret = amf_get_string(ioc, str_val, sizeof(str_val))) <= 0) {
             ret = AVERROR(EIO);
@@ -335,10 +335,15 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc,
         }
 
         // Expect array object in context
-        if (avio_r8(ioc) != AMF_DATA_TYPE_ARRAY)
+        amf_type = avio_strict_r8(ioc, &ret);
+        if (ret < 0)
+            goto fail;
+        if (amf_type != AMF_DATA_TYPE_ARRAY)
             break;
 
-        arraylen = avio_rb32(ioc);
+        arraylen = avio_strict_rb32(ioc, &ret);
+        if (ret < 0)
+            goto fail;
         if (arraylen>>28)
             break;
 
@@ -360,9 +365,14 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc,
         }
 
         for (i = 0; i < arraylen && avio_tell(ioc) < max_pos - 1; i++) {
-            if (avio_r8(ioc) != AMF_DATA_TYPE_NUMBER)
+            amf_type = avio_strict_r8(ioc, &ret);
+            if (ret < 0)
+                goto fail;
+            if (amf_type != AMF_DATA_TYPE_NUMBER)
                 goto invalid;
-            current_array[0][i] = av_int2double(avio_rb64(ioc));
+            current_array[0][i] = av_int2double(avio_strict_rb64(ioc, &ret));
+            if (ret < 0)
+                goto fail;
         }
         if (times && filepositions) {
             // All done, exiting at a position allowing amf_parse_object
@@ -388,7 +398,6 @@ invalid:
     }
 
 finish:
-    avio_seek(ioc, initial_pos, SEEK_SET);
 fail:
     av_freep(&times);
     av_freep(&filepositions);
@@ -427,10 +436,16 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
     case AMF_DATA_TYPE_OBJECT:
         if ((vstream || astream) && key &&
             ioc->seekable &&
-            !strcmp(KEYFRAMES_TAG, key) && depth == 1)
+            !strcmp(KEYFRAMES_TAG, key) && depth == 1) {
+            int64_t initial_pos = avio_tell(ioc);
             if (parse_keyframes_index(s, ioc, vstream ? vstream : astream,
-                                      max_pos) < 0)
+                                      max_pos) < 0) {
                 av_log(s, AV_LOG_ERROR, "Keyframe index parsing failed\n");
+                if ((ret = avio_seek(ioc, initial_pos, SEEK_SET)) < 0) {
+                    return -1;
+                }
+            }
+        }
 
         while (avio_tell(ioc) < max_pos - 2) {
             if (amf_get_string(ioc, str_val, sizeof(str_val)) <= 0)
