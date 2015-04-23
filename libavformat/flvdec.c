@@ -703,13 +703,15 @@ static int flv_get_extradata(AVFormatContext *s, AVStream *st, int size)
 static int flv_queue_extradata(FLVContext *flv, AVIOContext *pb, int stream,
                                int size)
 {
+    int ret;
     av_free(flv->new_extradata[stream]);
     flv->new_extradata[stream] = av_mallocz(size +
                                             FF_INPUT_BUFFER_PADDING_SIZE);
     if (!flv->new_extradata[stream])
         return AVERROR(ENOMEM);
     flv->new_extradata_size[stream] = size;
-    avio_read(pb, flv->new_extradata[stream], size);
+    if ((ret = avio_read(pb, flv->new_extradata[stream], size)) < 0)
+        return ret;
     return 0;
 }
 
