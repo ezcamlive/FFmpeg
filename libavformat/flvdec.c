@@ -605,7 +605,7 @@ static int flv_read_metabody(AVFormatContext *s, int64_t next_pos)
     AVStream *stream, *astream, *vstream;
     AVStream av_unused *dstream;
     AVIOContext *ioc;
-    int i;
+    int i, ret;
     // only needs to hold the string "onMetaData".
     // Anything longer is something we don't want.
     char buffer[11];
@@ -616,7 +616,9 @@ static int flv_read_metabody(AVFormatContext *s, int64_t next_pos)
     ioc     = s->pb;
 
     // first object needs to be "onMetaData" string
-    type = avio_r8(ioc);
+    type = avio_strict_r8(ioc, &ret);
+    if (ret < 0)
+        return ret;
     if (type != AMF_DATA_TYPE_STRING)
         return TYPE_UNKNOWN;
     if (amf_get_string(ioc, buffer, sizeof(buffer)) < 0)
