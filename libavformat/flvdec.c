@@ -288,13 +288,18 @@ static int flv_set_video_codec(AVFormatContext *s, AVStream *vstream,
 
 static int amf_get_string(AVIOContext *ioc, char *buffer, int buffsize)
 {
-    int length = avio_rb16(ioc);
+    int ret;
+    int length = avio_strict_rb16(ioc, &ret);
+    if (ret < 0)
+        return ret;
     if (length >= buffsize) {
         avio_skip(ioc, length);
         return -1;
     }
 
-    avio_read(ioc, buffer, length);
+    ret = avio_read(ioc, buffer, length);
+    if (ret < 0)
+        return ret;
 
     buffer[length] = '\0';
 
@@ -320,10 +325,14 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc,
     if (s->flags & AVFMT_FLAG_IGNIDX)
         return 0;
 
-    while (avio_tell(ioc) < max_pos - 2 &&
-           amf_get_string(ioc, str_val, sizeof(str_val)) > 0) {
+    while (avio_tell(ioc) < max_pos - 2) {
         int64_t **current_array;
         unsigned int arraylen;
+
+        if ((ret = amf_get_string(ioc, str_val, sizeof(str_val))) <= 0) {
+            ret = AVERROR(EIO);
+            goto fail;
+        }
 
         // Expect array object in context
         if (avio_r8(ioc) != AMF_DATA_TYPE_ARRAY)
@@ -379,9 +388,10 @@ invalid:
     }
 
 finish:
+    avio_seek(ioc, initial_pos, SEEK_SET);
+fail:
     av_freep(&times);
     av_freep(&filepositions);
-    avio_seek(ioc, initial_pos, SEEK_SET);
     return ret;
 }
 
@@ -422,11 +432,13 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
                                       max_pos) < 0)
                 av_log(s, AV_LOG_ERROR, "Keyframe index parsing failed\n");
 
-        while (avio_tell(ioc) < max_pos - 2 &&
-               amf_get_string(ioc, str_val, sizeof(str_val)) > 0)
+        while (avio_tell(ioc) < max_pos - 2) {
+            if (amf_get_string(ioc, str_val, sizeof(str_val)) <= 0)
+                return -1;
             if (amf_parse_object(s, astream, vstream, str_val, max_pos,
                                  depth + 1) < 0)
                 return -1;     // if we couldn't skip, bomb out.
+        }
         if (avio_r8(ioc) != AMF_END_OF_OBJECT) {
             av_log(s, AV_LOG_ERROR, "Missing AMF_END_OF_OBJECT in AMF_DATA_TYPE_OBJECT\n");
             return -1;
@@ -438,13 +450,15 @@ static int amf_parse_object(AVFormatContext *s, AVStream *astream,
         break;     // these take up no additional space
     case AMF_DATA_TYPE_MIXEDARRAY:
         avio_skip(ioc, 4);     // skip 32-bit max array index
-        while (avio_tell(ioc) < max_pos - 2 &&
-               amf_get_string(ioc, str_val, sizeof(str_val)) > 0)
+        while (avio_tell(ioc) < max_pos - 2) {
+            if (amf_get_string(ioc, str_val, sizeof(str_val)) <= 0)
+                return -1;
             // this is the only case in which we would want a nested
             // parse to not skip over the object
             if (amf_parse_object(s, astream, vstream, str_val, max_pos,
                                  depth + 1) < 0)
                 return -1;
+        }
         if (avio_r8(ioc) != AMF_END_OF_OBJECT) {
             av_log(s, AV_LOG_ERROR, "Missing AMF_END_OF_OBJECT in AMF_DATA_TYPE_MIXEDARRAY\n");
             return -1;
@@ -571,9 +585,10 @@ static int flv_read_metabody(AVFormatContext *s, int64_t next_pos)
 
     // first object needs to be "onMetaData" string
     type = avio_r8(ioc);
-    if (type != AMF_DATA_TYPE_STRING ||
-        amf_get_string(ioc, buffer, sizeof(buffer)) < 0)
+    if (type != AMF_DATA_TYPE_STRING)
         return TYPE_UNKNOWN;
+    if (amf_get_string(ioc, buffer, sizeof(buffer)) < 0)
+        return -1;
 
     if (!strcmp(buffer, "onTextData"))
         return TYPE_ONTEXTDATA;
@@ -732,7 +747,9 @@ static int flv_data_packet(AVFormatContext *s, AVPacket *pkt,
         goto skip;
     }
 
-    while ((ret = amf_get_string(pb, buf, sizeof(buf))) > 0) {
+    while (1) {
+        if ((ret = amf_get_string(pb, buf, sizeof(buf))) <= 0)
+            return AVERROR(EIO);
         AMFDataType type = avio_r8(pb);
         if (type == AMF_DATA_TYPE_STRING && !strcmp(buf, "text")) {
             length = avio_rb16(pb);
