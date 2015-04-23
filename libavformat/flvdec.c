@@ -799,11 +799,16 @@ static int flv_data_packet(AVFormatContext *s, AVPacket *pkt,
     AVStream *st    = NULL;
     char buf[20];
     int ret = AVERROR_INVALIDDATA;
-    int i, length = -1;
+    int i, length = -1, amf_type;
 
-    switch (avio_r8(pb)) {
+    amf_type = avio_strict_r8(pb, &ret);
+    if (ret < 0)
+        goto skip;
+
+    switch (amf_type) {
     case AMF_DATA_TYPE_MIXEDARRAY:
-        avio_seek(pb, 4, SEEK_CUR);
+        if (avio_seek(pb, 4, SEEK_CUR) < 0)
+            goto skip;
     case AMF_DATA_TYPE_OBJECT:
         break;
     default:
@@ -811,18 +816,22 @@ static int flv_data_packet(AVFormatContext *s, AVPacket *pkt,
     }
 
     while (1) {
-        if ((ret = amf_get_string(pb, buf, sizeof(buf))) <= 0)
-            return AVERROR(EIO);
-        AMFDataType type = avio_r8(pb);
+        if (amf_get_string(pb, buf, sizeof(buf)))
+            goto skip;
+        AMFDataType type = avio_strict_r8(pb, &ret);
+        if (ret < 0)
+            return ret;
         if (type == AMF_DATA_TYPE_STRING && !strcmp(buf, "text")) {
-            length = avio_rb16(pb);
+            length = avio_strict_rb16(pb, &ret);
+            if (ret < 0)
+                goto skip;
             ret    = av_get_packet(pb, pkt, length);
             if (ret < 0)
                 goto skip;
             else
                 break;
         } else {
-            if ((ret = amf_skip_tag(pb, type)) < 0)
+            if (amf_skip_tag(pb, type) < 0)
                 goto skip;
         }
     }
@@ -853,7 +862,8 @@ static int flv_data_packet(AVFormatContext *s, AVPacket *pkt,
     pkt->flags       |= AV_PKT_FLAG_KEY;
 
 skip:
-    avio_seek(s->pb, next + 4, SEEK_SET);
+    if (avio_seek(s->pb, next + 4, SEEK_SET) < 0)
+        return AVERROR(EIO);
 
     return ret;
 }
