@@ -32,6 +32,8 @@
 #define BUFFER_CAPACITY     (4 * 1024 * 1024)
 #define FAST_SEEK_THRESHOLD (256 * 1024)
 
+#define AVTRACE av_log
+
 typedef struct RingBuffer {
     size_t          capacity;
     uint8_t        *buffer_begin;
@@ -101,14 +103,13 @@ static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
     size_t to_consume = bytes;
 
     while (to_consume > 0) {
-        int space = ring_space(ring);
-        if (space <= 0)
+        if (ring->size <= 0)
             break;
 
         if (ring->read_pointer >= ring->buffer_end)
             ring->read_pointer = ring->buffer_begin;
 
-        int to_copy = (int)FFMIN3(to_consume, space, (ring->buffer_end - ring->read_pointer));
+        int to_copy = (int)FFMIN3(to_consume, ring->size, (ring->buffer_end - ring->read_pointer));
         if (copy_func) {
             copy_func(buf, ring->read_pointer, to_copy);
         } else {
@@ -178,7 +179,7 @@ static void *async_buffer_task(void *arg)
     RingBuffer *ring = &c->ring_buffer;
     int         ret  = 0;
 
-    while (1) {            
+    while (1) {
         if (async_interrupt_callback(h)) {
             c->io_eof_reached = 1;
             c->io_error       = AVERROR_EXIT;
@@ -210,6 +211,7 @@ static void *async_buffer_task(void *arg)
 
             pthread_cond_signal(&c->cond_wakeup_main);
             pthread_mutex_unlock(&c->mutex);
+            continue;
         }
 
         ret = ring_drain(ring, c->inner, 4096);
@@ -297,6 +299,11 @@ static int async_close(URLContext *h)
     Context *c = h->priv_data;
     int      ret;
 
+    pthread_mutex_lock(&c->mutex);
+    c->abort_request = 1;
+    pthread_cond_signal(&c->cond_wakeup_background);
+    pthread_mutex_unlock(&c->mutex);
+
     ret = pthread_join(c->async_buffer_thread, NULL);
     if (ret != 0)
         av_log(h, AV_LOG_ERROR, "pthread_join(): %s\n", strerror(ret));
@@ -345,7 +352,11 @@ static int async_read_internal(URLContext *h, unsigned char *buf, int size,
 
 static int async_read(URLContext *h, unsigned char *buf, int size)
 {
-    return async_read_internal(h, buf, size, NULL);
+    Context *c = h->priv_data;
+    int ret = async_read_internal(h, buf, size, NULL);
+    AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, (int)c->logical_pos);
+
+    return ret;
 }
 
 static void do_nothing(void *dst, const void *src, int size)
@@ -360,10 +371,13 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     int64_t     new_logical_pos;
 
     if (whence == AVSEEK_SIZE) {
+        AVTRACE(h, AV_LOG_ERROR, "async_seek: AVSEEK_SIZE\n");
         return c->logical_size;
     } if (whence == SEEK_CUR) {
+        AVTRACE(h, AV_LOG_ERROR, "async_seek: %"PRId64"\n", pos);
         new_logical_pos = pos + c->logical_pos;
     } else if (whence == SEEK_SET){
+        AVTRACE(h, AV_LOG_ERROR, "async_seek: %"PRId64"\n", pos);
         new_logical_pos = pos;
     } else {
         return AVERROR(EINVAL);
