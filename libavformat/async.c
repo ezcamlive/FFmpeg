@@ -29,7 +29,8 @@
 #include <stdint.h>
 #include <pthread.h>
 
-#define BUFFER_CAPACITY (4 * 1024)
+#define BUFFER_CAPACITY     (4 * 1024 * 1024)
+#define FAST_SEEK_THRESHOLD (256 * 1024)
 
 typedef struct RingBuffer {
     size_t          capacity;
@@ -94,7 +95,8 @@ static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
     return bytes - to_drain;
 }
 
-static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes)
+static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
+                     void (*copy_func)(void *, const void *, int))
 {
     size_t to_consume = bytes;
 
@@ -107,7 +109,11 @@ static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes)
             ring->read_pointer = ring->buffer_begin;
 
         int to_copy = (int)FFMIN3(to_consume, space, (ring->buffer_end - ring->read_pointer));
-        memcpy(buf, ring->read_pointer, to_copy);
+        if (copy_func) {
+            copy_func(buf, ring->read_pointer, to_copy);
+        } else {
+            memcpy(buf, ring->read_pointer, to_copy);
+        }
 
         to_consume         -= to_copy;
         ring->read_pointer += to_copy;
@@ -138,6 +144,7 @@ typedef struct Context {
     int             io_eof_reached;
 
     size_t          logical_pos;
+    size_t          logical_size;
     RingBuffer      ring_buffer;
 
     pthread_cond_t  cond_wakeup_main;
@@ -189,8 +196,6 @@ static void *async_buffer_task(void *arg)
         if (c->seek_request) {
             pthread_mutex_lock(&c->mutex);
 
-            /* TODO: fast-seek */
-
             ret = ffurl_seek(c->inner, c->seek_pos, c->seek_whence);
             if (ret < 0) {
                 c->io_eof_reached = 1;
@@ -225,9 +230,9 @@ static void *async_buffer_task(void *arg)
 
 static int async_open(URLContext *h, const char *arg, int flags, AVDictionary **options)
 {
-    int ret;
-    Context *c = h->priv_data;
-    AVIOInterruptCB interrupt_callback = {.callback = async_interrupt_callback, .opaque = h};
+    Context         *c = h->priv_data;
+    int              ret;
+    AVIOInterruptCB  interrupt_callback = {.callback = async_interrupt_callback, .opaque = h};
 
     av_strstart(arg, "async:", &arg);
 
@@ -244,6 +249,8 @@ static int async_open(URLContext *h, const char *arg, int flags, AVDictionary **
         av_log(h, AV_LOG_ERROR, "ffurl_open failed : %s, %s\n", strerror(ret), arg);
         goto url_fail;
     }
+
+    c->logical_size = ffurl_size(c->inner);
 
     ret = pthread_mutex_init(&c->mutex, NULL);
     if (ret != 0) {
@@ -303,7 +310,8 @@ static int async_close(URLContext *h)
     return 0;
 }
 
-static int async_read(URLContext *h, unsigned char *buf, int size)
+static int async_read_internal(URLContext *h, unsigned char *buf, int size,
+                               void (*copy_func)(void *, const void *, int))
 {
     Context    *c    = h->priv_data;
     RingBuffer *ring = &c->ring_buffer;
@@ -319,9 +327,11 @@ static int async_read(URLContext *h, unsigned char *buf, int size)
             break;
         }
         if (ring->size >= size || c->io_eof_reached) {
-            ret = ring_read(ring, buf, size);
+            ret = ring_read(ring, buf, size, copy_func);
             if (ret == 0 && c->io_eof_reached)
                 ret = AVERROR_EOF;
+            else if (ret > 0)
+                c->logical_pos += ret;
             break;
         }
         pthread_cond_signal(&c->cond_wakeup_background);
@@ -333,16 +343,56 @@ static int async_read(URLContext *h, unsigned char *buf, int size)
     return ret;
 }
 
+static int async_read(URLContext *h, unsigned char *buf, int size)
+{
+    return async_read_internal(h, buf, size, NULL);
+}
+
+static void do_nothing(void *dst, const void *src, int size)
+{
+}
+
 static int64_t async_seek(URLContext *h, int64_t pos, int whence)
 {
-    Context *c = h->priv_data;
-    int64_t ret;
+    Context    *c    = h->priv_data;
+    RingBuffer *ring = &c->ring_buffer;
+    int64_t     ret;
+    int64_t     new_logical_pos;
+
+    if (whence == AVSEEK_SIZE) {
+        return c->logical_size;
+    } if (whence == SEEK_CUR) {
+        new_logical_pos = pos + c->logical_pos;
+    } else if (whence == SEEK_SET){
+        new_logical_pos = pos;
+    } else {
+        return AVERROR(EINVAL);
+    }
+    if (new_logical_pos < 0)
+        return AVERROR(EINVAL);
+
+    /* ring->size doesn't have to be accurace here */
+    if (new_logical_pos == c->logical_pos) {
+        /* current position */
+        return c->logical_pos;
+    } else if ((new_logical_pos > c->logical_pos) ||
+               (new_logical_pos < (c->logical_pos + ring->size + FAST_SEEK_THRESHOLD))) {
+        /* fast seek */
+        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, do_nothing);
+        return c->logical_pos;
+    } else if (c->logical_size <= 0) {
+        /* can not seek */
+        return AVERROR(EINVAL);
+    } else if (new_logical_pos > c->logical_size) {
+        /* beyond end */
+        return AVERROR(EINVAL);
+    }
 
     pthread_mutex_lock(&c->mutex);
 
     c->seek_request   = 1;
-    c->seek_pos       = pos;
-    c->seek_whence    = whence;
+    c->seek_pos       = new_logical_pos;
+    c->seek_whence    = SEEK_SET;
     c->seek_completed = 0;
     c->seek_ret       = 0;
 
@@ -352,6 +402,8 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
             break;
         }
         if (c->seek_completed) {
+            if (c->seek_ret >= 0)
+                c->logical_pos  = c->seek_ret;
             ret = c->seek_ret;
             break;
         }
