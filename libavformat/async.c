@@ -146,7 +146,7 @@ static int ring_generic_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
     return bytes - to_consume;
 }
 
-static void ring_remove_all(RingBuffer *ring)
+static void ring_reset(RingBuffer *ring)
 {
     ring->write_pointer = ring->buffer_begin;
     ring->read_pointer  = ring->buffer_begin;
@@ -208,30 +208,33 @@ static void *async_buffer_task(void *arg)
             break;
         }
 
-        if (c->io_eof_reached || (ring->size >= ring->capacity && !c->seek_request)) {
-            pthread_mutex_lock(&c->mutex);
-            pthread_cond_signal(&c->cond_wakeup_main);
-            pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
-            pthread_mutex_unlock(&c->mutex);
-            continue;
-        }
-
         if (c->seek_request) {
             pthread_mutex_lock(&c->mutex);
 
             ret = ffurl_seek(c->inner, c->seek_pos, c->seek_whence);
             if (ret < 0) {
                 c->io_eof_reached = 1;
-                c->io_error = ret;
+                c->io_error       = ret;
+            } else {
+                c->io_eof_reached = 0;
+                c->io_error       = 0;
             }
 
             c->seek_completed = 1;
             c->seek_ret       = ret;
             c->seek_request   = 0;
 
-            ring_remove_all(ring);
+            ring_reset(ring);
 
             pthread_cond_signal(&c->cond_wakeup_main);
+            pthread_mutex_unlock(&c->mutex);
+            continue;
+        }
+
+        if (c->io_eof_reached || ring->size >= ring->capacity) {
+            pthread_mutex_lock(&c->mutex);
+            pthread_cond_signal(&c->cond_wakeup_main);
+            pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
             pthread_mutex_unlock(&c->mutex);
             continue;
         }
