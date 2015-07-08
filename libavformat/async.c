@@ -99,7 +99,7 @@ static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
 }
 
 static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
-                     void (*copy_func)(void *, const void *, int))
+                     void (*copy_func)(void *dst, const void *src, int size))
 {
     size_t to_consume = bytes;
 
