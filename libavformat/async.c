@@ -21,6 +21,7 @@
  * Based on file.c by Fabrice Bellard
  */
 
+#include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/error.h"
 #include "libavutil/log.h"
@@ -58,6 +59,21 @@ static int ring_init(RingBuffer *ring)
     ring->write_pointer = ring->buffer_begin;
     ring->read_pointer  = ring->buffer_end;
     return 0;
+}
+
+typedef int (*ring_copy_func)(void *dst, const void *src, int size, void *opaque);
+
+static int ring_default_copy_func(void *dst, const void *src, int size, void *opaque)
+{
+    av_assert2(dst);
+    av_assert2(src);
+    memcpy(dst, src, size);
+    return size;
+}
+
+static int ring_do_nothing_copy_func(void *dst, const void *src, int size, void *opaque)
+{
+    return size;
 }
 
 static void ring_destroy(RingBuffer *ring)
@@ -99,10 +115,12 @@ static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
 }
 
 static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
-                     int (*copy_func)(void *dst, const void *src, int size))
+                     void *opaque, ring_copy_func copy_func)
 {
-    int    ret;
     size_t to_consume = bytes;
+
+    if (!copy_func)
+        copy_func = ring_default_copy_func;
 
     while (to_consume > 0) {
         if (ring->size <= 0)
@@ -112,19 +130,17 @@ static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
             ring->read_pointer = ring->buffer_begin;
 
         int to_copy = (int)FFMIN3(to_consume, ring->size, (ring->buffer_end - ring->read_pointer));
-        if (copy_func) {
-            ret = copy_func(buf, ring->read_pointer, to_copy);
-            if (ret < 0)
-                return ret;
-        } else {
-            memcpy(buf, ring->read_pointer, to_copy);
-            ret = to_copy;
-        }
+        int ret = copy_func(buf, ring->read_pointer, to_copy, opaque);
+        if (ret < 0)
+            return ret;
 
         buf                += ret;
         to_consume         -= ret;
         ring->read_pointer += ret;
         ring->size         -= ret;
+
+        if (ret < to_copy)
+            break;
     }
 
     return bytes - to_consume;
@@ -323,8 +339,7 @@ static int async_close(URLContext *h)
     return 0;
 }
 
-static int async_read_internal(URLContext *h, unsigned char *buf, int size,
-                               void (*copy_func)(void *, const void *, int))
+static int async_read_internal(URLContext *h, unsigned char *buf, int size, void *opaque, ring_copy_func copy_func)
 {
     Context    *c    = h->priv_data;
     RingBuffer *ring = &c->ring_buffer;
@@ -340,7 +355,7 @@ static int async_read_internal(URLContext *h, unsigned char *buf, int size,
             break;
         }
         if (ring->size >= size || c->io_eof_reached) {
-            ret = ring_read(ring, buf, size, copy_func);
+            ret = ring_read(ring, buf, size, opaque, copy_func);
             if (ret == 0 && c->io_eof_reached)
                 ret = AVERROR_EOF;
             else if (ret > 0)
@@ -359,15 +374,10 @@ static int async_read_internal(URLContext *h, unsigned char *buf, int size,
 static int async_read(URLContext *h, unsigned char *buf, int size)
 {
     Context *c = h->priv_data;
-    int ret = async_read_internal(h, buf, size, NULL);
+    int ret = async_read_internal(h, buf, size, NULL, NULL);
     AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, (int)c->logical_pos);
 
     return ret;
-}
-
-static int do_nothing(void *dst, const void *src, int size)
-{
-    return size;
 }
 
 static int64_t async_seek(URLContext *h, int64_t pos, int whence)
@@ -392,7 +402,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     if (new_logical_pos < 0)
         return AVERROR(EINVAL);
 
-    /* ring->size doesn't have to be accurace here */
+    /* ring->size doesn't have to be accurate here */
     if (new_logical_pos == c->logical_pos) {
         /* current position */
         return c->logical_pos;
@@ -402,7 +412,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
         AVTRACE(h, AV_LOG_ERROR, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
                 new_logical_pos, (int)c->logical_pos,
                 (int)(new_logical_pos - c->logical_pos), (int)ring->size);
-        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, do_nothing);
+        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, NULL, ring_do_nothing_copy_func);
         return c->logical_pos;
     } else if (c->logical_size <= 0) {
         /* can not seek */
