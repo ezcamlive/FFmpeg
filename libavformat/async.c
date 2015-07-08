@@ -99,8 +99,9 @@ static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
 }
 
 static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
-                     void (*copy_func)(void *dst, const void *src, int size))
+                     int (*copy_func)(void *dst, const void *src, int size))
 {
+    int    ret;
     size_t to_consume = bytes;
 
     while (to_consume > 0) {
@@ -112,15 +113,18 @@ static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
 
         int to_copy = (int)FFMIN3(to_consume, ring->size, (ring->buffer_end - ring->read_pointer));
         if (copy_func) {
-            copy_func(buf, ring->read_pointer, to_copy);
+            ret = copy_func(buf, ring->read_pointer, to_copy);
+            if (ret < 0)
+                return ret;
         } else {
             memcpy(buf, ring->read_pointer, to_copy);
+            ret = to_copy;
         }
 
-        buf                += to_copy;
-        to_consume         -= to_copy;
-        ring->read_pointer += to_copy;
-        ring->size         -= to_copy;
+        buf                += ret;
+        to_consume         -= ret;
+        ring->read_pointer += ret;
+        ring->size         -= ret;
     }
 
     return bytes - to_consume;
@@ -361,8 +365,9 @@ static int async_read(URLContext *h, unsigned char *buf, int size)
     return ret;
 }
 
-static void do_nothing(void *dst, const void *src, int size)
+static int do_nothing(void *dst, const void *src, int size)
 {
+    return size;
 }
 
 static int64_t async_seek(URLContext *h, int64_t pos, int whence)
