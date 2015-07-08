@@ -30,18 +30,19 @@
 #include <pthread.h>
 
 #define BUFFER_CAPACITY     (4 * 1024 * 1024)
-#define FAST_SEEK_THRESHOLD (256 * 1024)
+//#define FAST_SEEK_THRESHOLD (256 * 1024)
+#define FAST_SEEK_THRESHOLD (16 * 1024 * 1024)
 
 #define AVTRACE av_log
 
 typedef struct RingBuffer {
-    size_t          capacity;
-    uint8_t        *buffer_begin;
-    uint8_t        *buffer_end;
+    size_t      capacity;
+    uint8_t    *buffer_begin;
+    uint8_t    *buffer_end;
 
-    size_t          size;
-    uint8_t        *write_pointer;
-    uint8_t        *read_pointer;
+    size_t      size;
+    uint8_t    *write_pointer;
+    uint8_t    *read_pointer;
 } RingBuffer;
 
 static int ring_init(RingBuffer *ring)
@@ -116,6 +117,7 @@ static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
             memcpy(buf, ring->read_pointer, to_copy);
         }
 
+        buf                += to_copy;
         to_consume         -= to_copy;
         ring->read_pointer += to_copy;
         ring->size         -= to_copy;
@@ -124,7 +126,7 @@ static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
     return bytes - to_consume;
 }
 
-static void ring_reset(RingBuffer *ring)
+static void ring_remove_all(RingBuffer *ring)
 {
     ring->write_pointer = ring->buffer_begin;
     ring->read_pointer  = ring->buffer_begin;
@@ -207,7 +209,7 @@ static void *async_buffer_task(void *arg)
             c->seek_ret       = ret;
             c->seek_request   = 0;
 
-            ring_reset(ring);
+            ring_remove_all(ring);
 
             pthread_cond_signal(&c->cond_wakeup_main);
             pthread_mutex_unlock(&c->mutex);
@@ -389,9 +391,12 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     if (new_logical_pos == c->logical_pos) {
         /* current position */
         return c->logical_pos;
-    } else if ((new_logical_pos > c->logical_pos) ||
+    } else if ((new_logical_pos > c->logical_pos) &&
                (new_logical_pos < (c->logical_pos + ring->size + FAST_SEEK_THRESHOLD))) {
         /* fast seek */
+        AVTRACE(h, AV_LOG_ERROR, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
+                new_logical_pos, (int)c->logical_pos,
+                (int)(new_logical_pos - c->logical_pos), (int)ring->size);
         async_read_internal(h, NULL, new_logical_pos - c->logical_pos, do_nothing);
         return c->logical_pos;
     } else if (c->logical_size <= 0) {
