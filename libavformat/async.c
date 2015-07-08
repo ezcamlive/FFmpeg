@@ -91,12 +91,12 @@ static int ring_space(RingBuffer *ring)
 static int ring_generic_write(RingBuffer *ring, uint8_t *buf, size_t bytes,
                               void *opaque, ring_copy_func copy_func)
 {
-    size_t to_drain = bytes;
+    size_t to_write = bytes;
 
     if (!copy_func)
         copy_func = ring_default_copy_func;
 
-    while (to_drain > 0) {
+    while (to_write > 0) {
         int space = ring_space(ring);
         if (space <= 0)
             break;
@@ -104,52 +104,53 @@ static int ring_generic_write(RingBuffer *ring, uint8_t *buf, size_t bytes,
         if (ring->write_pointer >= ring->buffer_end)
             ring->write_pointer = ring->buffer_begin;
 
-        int to_copy = (int)FFMIN3(to_drain, space, (ring->buffer_end - ring->write_pointer));
+        int to_copy = (int)FFMIN3(to_write, space, (ring->buffer_end - ring->write_pointer));
         int ret = copy_func(ring->write_pointer, buf, to_copy, opaque);
         if (ret < 0)
             return ret;
 
-        to_drain            -= ret;
+        if (buf) buf        += ret;
         ring->write_pointer += ret;
         ring->size          += ret;
+        to_write            -= ret;
 
         if (ret < to_copy)
             break;
     }
 
-    return bytes - to_drain;
+    return bytes - to_write;
 }
 
 static int ring_generic_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
                              void *opaque, ring_copy_func copy_func)
 {
-    size_t to_consume = bytes;
+    size_t to_read = bytes;
 
     if (!copy_func)
         copy_func = ring_default_copy_func;
 
-    while (to_consume > 0) {
+    while (to_read > 0) {
         if (ring->size <= 0)
             break;
 
         if (ring->read_pointer >= ring->buffer_end)
             ring->read_pointer = ring->buffer_begin;
 
-        int to_copy = (int)FFMIN3(to_consume, ring->size, (ring->buffer_end - ring->read_pointer));
+        int to_copy = (int)FFMIN3(to_read, ring->size, (ring->buffer_end - ring->read_pointer));
         int ret = copy_func(buf, ring->read_pointer, to_copy, opaque);
         if (ret < 0)
             return ret;
 
-        buf                += ret;
-        to_consume         -= ret;
+        if (buf) buf       += ret;
         ring->read_pointer += ret;
         ring->size         -= ret;
+        to_read            -= ret;
 
         if (ret < to_copy)
             break;
     }
 
-    return bytes - to_consume;
+    return bytes - to_read;
 }
 
 static void ring_reset(RingBuffer *ring)
