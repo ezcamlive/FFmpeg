@@ -88,10 +88,13 @@ static int ring_space(RingBuffer *ring)
     return ring->capacity - ring->size;
 }
 
-static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
+static int ring_generic_write(RingBuffer *ring, uint8_t *buf, size_t bytes,
+                              void *opaque, ring_copy_func copy_func)
 {
-    int    ret      = 0;
     size_t to_drain = bytes;
+
+    if (!copy_func)
+        copy_func = ring_default_copy_func;
 
     while (to_drain > 0) {
         int space = ring_space(ring);
@@ -101,21 +104,24 @@ static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
         if (ring->write_pointer >= ring->buffer_end)
             ring->write_pointer = ring->buffer_begin;
 
-        int to_read = (int)FFMIN3(to_drain, space, (ring->buffer_end - ring->write_pointer));
-        ret = ffurl_read(inner, ring->write_pointer, to_read);
+        int to_copy = (int)FFMIN3(to_drain, space, (ring->buffer_end - ring->write_pointer));
+        int ret = copy_func(ring->write_pointer, buf, to_copy, opaque);
         if (ret < 0)
             return ret;
 
         to_drain            -= ret;
         ring->write_pointer += ret;
         ring->size          += ret;
+
+        if (ret < to_copy)
+            break;
     }
 
     return bytes - to_drain;
 }
 
 static int ring_generic_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
-                     void *opaque, ring_copy_func copy_func)
+                             void *opaque, ring_copy_func copy_func)
 {
     size_t to_consume = bytes;
 
@@ -194,6 +200,15 @@ static int async_interrupt_callback(void *arg)
     return c->abort_request;
 }
 
+static int async_read_from_url(void *dst, const void *src, int size, void *opaque)
+{
+    av_assert2(opaque);
+    av_assert2(dst);
+
+    URLContext *c = opaque;
+    return ffurl_read(c, dst, size);
+}
+
 static void *async_buffer_task(void *arg)
 {
     URLContext *h    = arg;
@@ -239,7 +254,7 @@ static void *async_buffer_task(void *arg)
             continue;
         }
 
-        ret = ring_drain(ring, c->inner, 4096);
+        ret = ring_generic_write(ring, NULL, 4096, c->inner, async_read_from_url);
         if (ret <= 0) {
             c->io_eof_reached = 1;
             if (ret < 0) {
