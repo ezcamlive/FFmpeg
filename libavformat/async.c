@@ -114,7 +114,7 @@ static int ring_drain(RingBuffer *ring, URLContext *inner, size_t bytes)
     return bytes - to_drain;
 }
 
-static int ring_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
+static int ring_generic_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
                      void *opaque, ring_copy_func copy_func)
 {
     size_t to_consume = bytes;
@@ -355,7 +355,7 @@ static int async_read_internal(URLContext *h, unsigned char *buf, int size, void
             break;
         }
         if (ring->size >= size || c->io_eof_reached) {
-            ret = ring_read(ring, buf, size, opaque, copy_func);
+            ret = ring_generic_read(ring, buf, size, opaque, copy_func);
             if (ret == 0 && c->io_eof_reached)
                 ret = AVERROR_EOF;
             else if (ret > 0)
