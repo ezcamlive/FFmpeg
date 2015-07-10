@@ -358,33 +358,41 @@ static int async_close(URLContext *h)
     return 0;
 }
 
-static int async_read_internal(URLContext *h, unsigned char *buf, int size, void *opaque, ring_copy_func copy_func)
+static int async_read_internal(URLContext *h, unsigned char *buf, int size, int read_complete,
+                               void *opaque, ring_copy_func copy_func)
 {
-    Context    *c    = h->priv_data;
-    RingBuffer *ring = &c->ring_buffer;
-    int64_t     ret;
-
-    size = FFMIN(size, ring->capacity);
+    Context    *c       = h->priv_data;
+    RingBuffer *ring    = &c->ring_buffer;
+    int64_t     ret     = 0;
+    int         to_read = size;
 
     pthread_mutex_lock(&c->mutex);
 
-    while (1) {
+    while (to_read > 0) {
         if (async_interrupt_callback(h)) {
             ret = AVERROR_EXIT;
             break;
         }
-        if (ring->size >= size || c->io_eof_reached) {
-            ret = ring_generic_read(ring, buf, size, opaque, copy_func);
-            if (ret == 0 && c->io_eof_reached)
-                ret = AVERROR_EOF;
-            else if (ret > 0)
+        int to_copy = FFMIN3(to_read, ring->size, ring->capacity);
+        if (to_copy > 0 || c->io_eof_reached) {
+            ret = ring_generic_read(ring, buf, to_copy, opaque, copy_func);
+            if (ret < 0) {
+                break;
+            } else if (ret > 0) {
                 c->logical_pos += ret;
-            break;
+                to_read        -= ret;
+                if (to_read <= 0 || !read_complete)
+                    break;
+            } else if (c->io_eof_reached) {
+                ret = AVERROR_EOF;
+                break;
+            }
         }
         pthread_cond_signal(&c->cond_wakeup_background);
         pthread_cond_wait(&c->cond_wakeup_main, &c->mutex);
     }
 
+    pthread_cond_signal(&c->cond_wakeup_background);
     pthread_mutex_unlock(&c->mutex);
 
     return ret;
@@ -393,8 +401,9 @@ static int async_read_internal(URLContext *h, unsigned char *buf, int size, void
 static int async_read(URLContext *h, unsigned char *buf, int size)
 {
     Context *c = h->priv_data;
-    int ret = async_read_internal(h, buf, size, NULL, NULL);
-    AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, (int)c->logical_pos);
+    int old_pos = (int)c->logical_pos;
+    int ret = async_read_internal(h, buf, size > 10000 ? size / 2 : size, 0, NULL, NULL);
+    AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, old_pos);
 
     return ret;
 }
@@ -431,7 +440,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
         AVTRACE(h, AV_LOG_ERROR, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
                 new_logical_pos, (int)c->logical_pos,
                 (int)(new_logical_pos - c->logical_pos), (int)ring->size);
-        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, NULL, ring_do_nothing_copy_func);
+        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, 1, NULL, ring_do_nothing_copy_func);
         return c->logical_pos;
     } else if (c->logical_size <= 0) {
         /* can not seek */
