@@ -29,11 +29,12 @@
 #include "url.h"
 #include <stdint.h>
 #include <pthread.h>
+#include <unistd.h>
 
-#define BUFFER_CAPACITY     (4 * 1024 * 1024)
-//#define FAST_SEEK_THRESHOLD (256 * 1024)
-#define FAST_SEEK_THRESHOLD (16 * 1024 * 1024)
+#define BUFFER_CAPACITY         (4 * 1024 * 1024)
+#define SHORT_SEEK_THRESHOLD    (256 * 1024)
 
+/* FIXME: remove before submit patch */
 #define AVTRACE av_log
 
 typedef struct RingBuffer {
@@ -255,7 +256,7 @@ static void *async_buffer_task(void *arg)
             continue;
         }
 
-        ret = ring_generic_write(ring, NULL, 4096, c->inner, async_read_from_url);
+        ret = ring_generic_write(ring, NULL, 65535, c->inner, async_read_from_url);
         if (ret <= 0) {
             c->io_eof_reached = 1;
             if (ret < 0) {
@@ -435,7 +436,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
         /* current position */
         return c->logical_pos;
     } else if ((new_logical_pos > c->logical_pos) &&
-               (new_logical_pos < (c->logical_pos + ring->size + FAST_SEEK_THRESHOLD))) {
+               (new_logical_pos < (c->logical_pos + ring->size + SHORT_SEEK_THRESHOLD))) {
         /* fast seek */
         AVTRACE(h, AV_LOG_ERROR, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
                 new_logical_pos, (int)c->logical_pos,
