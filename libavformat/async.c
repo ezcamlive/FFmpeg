@@ -21,6 +21,13 @@
  * Based on file.c by Fabrice Bellard
  */
 
+ /**
+ * @TODO
+ *      support timeout
+ *      support backward short seek
+ *      support work with concatdec, hls
+ */
+
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/error.h"
@@ -295,6 +302,7 @@ static int async_open(URLContext *h, const char *arg, int flags, AVDictionary **
     }
 
     c->logical_size = ffurl_size(c->inner);
+    h->is_streamed  = c->inner->is_streamed;
 
     ret = pthread_mutex_init(&c->mutex, NULL);
     if (ret != 0) {
