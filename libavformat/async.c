@@ -333,9 +333,9 @@ static int async_open(URLContext *h, const char *arg, int flags, AVDictionary **
 
 thread_fail:
     pthread_cond_destroy(&c->cond_wakeup_background);
-cond_wakeup_main_fail:
-    pthread_cond_destroy(&c->cond_wakeup_main);
 cond_wakeup_background_fail:
+    pthread_cond_destroy(&c->cond_wakeup_main);
+cond_wakeup_main_fail:
     pthread_mutex_destroy(&c->mutex);
 mutex_fail:
     ffurl_close(c->inner);
