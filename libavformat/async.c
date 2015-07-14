@@ -19,7 +19,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  *
  * Based on libavformat/cache.c by Michael Niedermayer
- * Based on libavutil/fifo.c    by Fabrice Bellard, Roman Shaposhnik
  */
 
  /**
@@ -32,6 +31,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/error.h"
+#include "libavutil/fifo.h"
 #include "libavutil/log.h"
 #include "libavutil/opt.h"
 #include "url.h"
@@ -44,130 +44,6 @@
 
 /* FIXME: remove before submit patch */
 #define AVTRACE av_log
-
-typedef struct RingBuffer {
-    size_t      capacity;
-    uint8_t    *buffer_begin;
-    uint8_t    *buffer_end;
-
-    size_t      size;
-    uint8_t    *write_pointer;
-    uint8_t    *read_pointer;
-} RingBuffer;
-
-static int ring_init(RingBuffer *ring)
-{
-    memset(ring, 0, sizeof(RingBuffer));
-    ring->capacity      = BUFFER_CAPACITY;
-
-    ring->buffer_begin = av_malloc(BUFFER_CAPACITY);
-    if (!ring->buffer_begin)
-        return AVERROR(ENOMEM);
-
-    ring->buffer_end    = ring->buffer_begin + ring->capacity;
-    ring->write_pointer = ring->buffer_begin;
-    ring->read_pointer  = ring->buffer_end;
-    return 0;
-}
-
-typedef int (*ring_copy_func)(void *dst, const void *src, int size, void *opaque);
-
-static int ring_default_copy_func(void *dst, const void *src, int size, void *opaque)
-{
-    av_assert2(dst);
-    av_assert2(src);
-    memcpy(dst, src, size);
-    return size;
-}
-
-static int ring_do_nothing_copy_func(void *dst, const void *src, int size, void *opaque)
-{
-    return size;
-}
-
-static void ring_destroy(RingBuffer *ring)
-{
-    if (ring->buffer_begin)
-        av_free(ring->buffer_begin);
-    memset(ring, 0, sizeof(RingBuffer));
-}
-
-static int ring_space(RingBuffer *ring)
-{
-    return ring->capacity - ring->size;
-}
-
-static int ring_generic_write(RingBuffer *ring, uint8_t *buf, size_t bytes,
-                              void *opaque, ring_copy_func copy_func)
-{
-    size_t to_write = bytes;
-
-    if (!copy_func)
-        copy_func = ring_default_copy_func;
-
-    while (to_write > 0) {
-        int space = ring_space(ring);
-        if (space <= 0)
-            break;
-
-        if (ring->write_pointer >= ring->buffer_end)
-            ring->write_pointer = ring->buffer_begin;
-
-        int to_copy = (int)FFMIN3(to_write, space, (ring->buffer_end - ring->write_pointer));
-        int ret = copy_func(ring->write_pointer, buf, to_copy, opaque);
-        if (ret < 0)
-            return ret;
-
-        if (buf) buf        += ret;
-        ring->write_pointer += ret;
-        ring->size          += ret;
-        to_write            -= ret;
-
-        if (ret < to_copy)
-            break;
-    }
-
-    return bytes - to_write;
-}
-
-static int ring_generic_read(RingBuffer *ring, uint8_t *buf, size_t bytes,
-                             void *opaque, ring_copy_func copy_func)
-{
-    size_t to_read = bytes;
-
-    if (!copy_func)
-        copy_func = ring_default_copy_func;
-
-    while (to_read > 0) {
-        if (ring->size <= 0)
-            break;
-
-        if (ring->read_pointer >= ring->buffer_end)
-            ring->read_pointer = ring->buffer_begin;
-
-        int to_copy = (int)FFMIN3(to_read, ring->size, (ring->buffer_end - ring->read_pointer));
-        int ret = copy_func(buf, ring->read_pointer, to_copy, opaque);
-        if (ret < 0)
-            return ret;
-
-        if (buf) buf       += ret;
-        ring->read_pointer += ret;
-        ring->size         -= ret;
-        to_read            -= ret;
-
-        if (ret < to_copy)
-            break;
-    }
-
-    return bytes - to_read;
-}
-
-static void ring_reset(RingBuffer *ring)
-{
-    ring->write_pointer = ring->buffer_begin;
-    ring->read_pointer  = ring->buffer_begin;
-    ring->size          = 0;
-}
 
 typedef struct Context {
     AVClass        *class;
@@ -184,7 +60,7 @@ typedef struct Context {
 
     size_t          logical_pos;
     size_t          logical_size;
-    RingBuffer      ring_buffer;
+    AVFifoBuffer   *fifo;
 
     pthread_cond_t  cond_wakeup_main;
     pthread_cond_t  cond_wakeup_background;
@@ -221,10 +97,10 @@ static int async_read_from_url(void *dst, const void *src, int size, void *opaqu
 
 static void *async_buffer_task(void *arg)
 {
-    URLContext *h    = arg;
-    Context    *c    = h->priv_data;
-    RingBuffer *ring = &c->ring_buffer;
-    int         ret  = 0;
+    URLContext   *h    = arg;
+    Context      *c    = h->priv_data;
+    AVFifoBuffer *fifo = c->fifo;
+    int           ret  = 0;
 
     while (1) {
         if (async_interrupt_callback(h)) {
@@ -249,14 +125,14 @@ static void *async_buffer_task(void *arg)
             c->seek_ret       = ret;
             c->seek_request   = 0;
 
-            ring_reset(ring);
+            av_fifo_reset(fifo);
 
             pthread_cond_signal(&c->cond_wakeup_main);
             pthread_mutex_unlock(&c->mutex);
             continue;
         }
 
-        if (c->io_eof_reached || ring->size >= ring->capacity) {
+        if (c->io_eof_reached || av_fifo_space(fifo) > 0) {
             pthread_mutex_lock(&c->mutex);
             pthread_cond_signal(&c->cond_wakeup_main);
             pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
@@ -264,7 +140,7 @@ static void *async_buffer_task(void *arg)
             continue;
         }
 
-        ret = ring_generic_write(ring, NULL, 65535, c->inner, async_read_from_url);
+        ret = av_fifo_generic_write(fifo, c->inner, 65535, (void *)ffurl_read);
         if (ret <= 0) {
             c->io_eof_reached = 1;
             if (ret < 0) {
@@ -288,10 +164,10 @@ static int async_open(URLContext *h, const char *arg, int flags, AVDictionary **
 
     av_strstart(arg, "async:", &arg);
 
-    ret = ring_init(&c->ring_buffer);
-    if (ret != 0) {
+    c->fifo = av_fifo_alloc(BUFFER_CAPACITY);
+    if (!c->fifo) {
         ret = AVERROR(ENOMEM);
-        goto ring_fail;
+        goto fifo_fail;
     }
 
     /* wrap interrupt callback */
@@ -340,8 +216,8 @@ cond_wakeup_main_fail:
 mutex_fail:
     ffurl_close(c->inner);
 url_fail:
-    ring_destroy(&c->ring_buffer);
-ring_fail:
+    av_fifo_freep(&c->fifo);
+fifo_fail:
     return ret;
 }
 
@@ -363,18 +239,18 @@ static int async_close(URLContext *h)
     pthread_cond_destroy(&c->cond_wakeup_main);
     pthread_mutex_destroy(&c->mutex);
     ffurl_close(c->inner);
-    ring_destroy(&c->ring_buffer);
+    av_fifo_freep(&c->fifo);
 
     return 0;
 }
 
-static int async_read_internal(URLContext *h, unsigned char *buf, int size, int read_complete,
-                               void *opaque, ring_copy_func copy_func)
+static int async_read_internal(URLContext *h, void *dest, int size, int read_complete,
+                               void (*func)(void*, void*, int))
 {
-    Context    *c       = h->priv_data;
-    RingBuffer *ring    = &c->ring_buffer;
-    int64_t     ret     = 0;
-    int         to_read = size;
+    Context      *c       = h->priv_data;
+    AVFifoBuffer *fifo    = c->fifo;
+    int64_t       ret     = 0;
+    int           to_read = size;
 
     pthread_mutex_lock(&c->mutex);
 
@@ -383,20 +259,17 @@ static int async_read_internal(URLContext *h, unsigned char *buf, int size, int 
             ret = AVERROR_EXIT;
             break;
         }
-        int to_copy = FFMIN3(to_read, ring->size, ring->capacity);
-        if (to_copy > 0 || c->io_eof_reached) {
-            ret = ring_generic_read(ring, buf, to_copy, opaque, copy_func);
-            if (ret < 0) {
+        int to_copy = FFMIN(to_read, av_fifo_size(fifo));
+        if (to_copy > 0) {
+            av_fifo_generic_read(fifo, dest, to_copy, NULL);
+            c->logical_pos += to_copy;
+            to_read        -= to_copy;
+
+            if (to_read <= 0 || !read_complete)
                 break;
-            } else if (ret > 0) {
-                c->logical_pos += ret;
-                to_read        -= ret;
-                if (to_read <= 0 || !read_complete)
-                    break;
-            } else if (c->io_eof_reached) {
-                ret = AVERROR_EOF;
-                break;
-            }
+        } else if (c->io_eof_reached) {
+            ret = AVERROR_EOF;
+            break;
         }
         pthread_cond_signal(&c->cond_wakeup_background);
         pthread_cond_wait(&c->cond_wakeup_main, &c->mutex);
@@ -412,18 +285,22 @@ static int async_read(URLContext *h, unsigned char *buf, int size)
 {
     Context *c = h->priv_data;
     int old_pos = (int)c->logical_pos;
-    int ret = async_read_internal(h, buf, size, 0, NULL, NULL);
+    int ret = async_read_internal(h, buf, size, 0, NULL);
     AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, old_pos);
 
     return ret;
 }
 
+static void fifo_do_not_copy_func(void* dest, void* src, int size) {
+    // do not copy
+}
+
 static int64_t async_seek(URLContext *h, int64_t pos, int whence)
 {
-    Context    *c    = h->priv_data;
-    RingBuffer *ring = &c->ring_buffer;
-    int64_t     ret;
-    int64_t     new_logical_pos;
+    Context      *c    = h->priv_data;
+    AVFifoBuffer *fifo = c->fifo;
+    int64_t       ret;
+    int64_t       new_logical_pos;
 
     if (whence == AVSEEK_SIZE) {
         AVTRACE(h, AV_LOG_ERROR, "async_seek: AVSEEK_SIZE\n");
@@ -440,17 +317,16 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     if (new_logical_pos < 0)
         return AVERROR(EINVAL);
 
-    /* ring->size doesn't have to be accurate here */
     if (new_logical_pos == c->logical_pos) {
         /* current position */
         return c->logical_pos;
     } else if ((new_logical_pos > c->logical_pos) &&
-               (new_logical_pos < (c->logical_pos + ring->size + SHORT_SEEK_THRESHOLD))) {
+               (new_logical_pos < (c->logical_pos + av_fifo_size(fifo) + SHORT_SEEK_THRESHOLD))) {
         /* fast seek */
         AVTRACE(h, AV_LOG_ERROR, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
                 new_logical_pos, (int)c->logical_pos,
-                (int)(new_logical_pos - c->logical_pos), (int)ring->size);
-        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, 1, NULL, ring_do_nothing_copy_func);
+                (int)(new_logical_pos - c->logical_pos), av_fifo_size(fifo));
+        async_read_internal(h, NULL, new_logical_pos - c->logical_pos, 1, fifo_do_not_copy_func);
         return c->logical_pos;
     } else if (c->logical_size <= 0) {
         /* can not seek */
