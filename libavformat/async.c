@@ -253,7 +253,7 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
         int fifo_size = av_fifo_size(fifo);
         int to_copy   = FFMIN(to_read, fifo_size);
         if (to_copy > 0) {
-            av_fifo_generic_read(fifo, dest, to_copy, NULL);
+            av_fifo_generic_read(fifo, dest, to_copy, func);
             dest            = (uint8_t *)dest + to_copy;
             c->logical_pos += to_copy;
             to_read        -= to_copy;
