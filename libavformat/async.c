@@ -86,15 +86,6 @@ static int async_interrupt_callback(void *arg)
     return c->abort_request;
 }
 
-static int async_read_from_url(void *dst, const void *src, int size, void *opaque)
-{
-    av_assert2(opaque);
-    av_assert2(dst);
-
-    URLContext *c = opaque;
-    return ffurl_read(c, dst, size);
-}
-
 static void *async_buffer_task(void *arg)
 {
     URLContext   *h    = arg;
