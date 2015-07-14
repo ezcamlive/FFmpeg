@@ -286,7 +286,7 @@ static int async_read(URLContext *h, unsigned char *buf, int size)
     Context *c = h->priv_data;
     int old_pos = (int)c->logical_pos;
     int ret = async_read_internal(h, buf, size, 0, NULL);
-    AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, old_pos);
+    AVTRACE(h, AV_LOG_DEBUG, "async_read(%d)=%d at %d\n", size, ret, old_pos);
 
     return ret;
 }
@@ -303,13 +303,13 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     int64_t       new_logical_pos;
 
     if (whence == AVSEEK_SIZE) {
-        AVTRACE(h, AV_LOG_ERROR, "async_seek: AVSEEK_SIZE\n");
+        AVTRACE(h, AV_LOG_DEBUG, "async_seek: AVSEEK_SIZE\n");
         return c->logical_size;
     } if (whence == SEEK_CUR) {
-        AVTRACE(h, AV_LOG_ERROR, "async_seek: %"PRId64"\n", pos);
+        AVTRACE(h, AV_LOG_DEBUG, "async_seek: %"PRId64"\n", pos);
         new_logical_pos = pos + c->logical_pos;
     } else if (whence == SEEK_SET){
-        AVTRACE(h, AV_LOG_ERROR, "async_seek: %"PRId64"\n", pos);
+        AVTRACE(h, AV_LOG_DEBUG, "async_seek: %"PRId64"\n", pos);
         new_logical_pos = pos;
     } else {
         return AVERROR(EINVAL);
@@ -323,7 +323,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     } else if ((new_logical_pos > c->logical_pos) &&
                (new_logical_pos < (c->logical_pos + av_fifo_size(fifo) + SHORT_SEEK_THRESHOLD))) {
         /* fast seek */
-        AVTRACE(h, AV_LOG_ERROR, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
+        AVTRACE(h, AV_LOG_DEBUG, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
                 new_logical_pos, (int)c->logical_pos,
                 (int)(new_logical_pos - c->logical_pos), av_fifo_size(fifo));
         async_read_internal(h, NULL, new_logical_pos - c->logical_pos, 1, fifo_do_not_copy_func);
