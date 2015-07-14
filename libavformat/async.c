@@ -262,7 +262,8 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
             if (to_read <= 0 || !read_complete)
                 break;
         } else if (c->io_eof_reached) {
-            ret = AVERROR_EOF;
+            if (ret <= 0)
+                ret = AVERROR_EOF;
             break;
         }
         pthread_cond_signal(&c->cond_wakeup_background);
