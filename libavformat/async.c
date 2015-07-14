@@ -123,7 +123,8 @@ static void *async_buffer_task(void *arg)
             continue;
         }
 
-        if (c->io_eof_reached || av_fifo_space(fifo) <= 0) {
+        int fifo_space = av_fifo_space(fifo);
+        if (c->io_eof_reached || fifo_space <= 0) {
             pthread_mutex_lock(&c->mutex);
             pthread_cond_signal(&c->cond_wakeup_main);
             pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
@@ -131,7 +132,8 @@ static void *async_buffer_task(void *arg)
             continue;
         }
 
-        ret = av_fifo_generic_write(fifo, c->inner, 65535, (void *)ffurl_read);
+        int to_copy = FFMIN(4096, fifo_space);
+        ret = av_fifo_generic_write(fifo, c->inner, to_copy, (void *)ffurl_read);
         if (ret <= 0) {
             c->io_eof_reached = 1;
             if (ret < 0) {
@@ -254,7 +256,8 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
         int to_copy   = FFMIN(to_read, fifo_size);
         if (to_copy > 0) {
             av_fifo_generic_read(fifo, dest, to_copy, func);
-            dest            = (uint8_t *)dest + to_copy;
+            if (!func)
+                dest = (uint8_t *)dest + to_copy;
             c->logical_pos += to_copy;
             to_read        -= to_copy;
             ret             = size - to_read;
