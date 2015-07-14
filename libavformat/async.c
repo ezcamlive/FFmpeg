@@ -18,7 +18,8 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  *
- * Based on file.c by Fabrice Bellard
+ * Based on libavformat/cache.c by Michael Niedermayer
+ * Based on libavutil/fifo.c    by Fabrice Bellard, Roman Shaposhnik
  */
 
  /**
