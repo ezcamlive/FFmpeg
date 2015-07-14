@@ -411,7 +411,7 @@ static int async_read(URLContext *h, unsigned char *buf, int size)
 {
     Context *c = h->priv_data;
     int old_pos = (int)c->logical_pos;
-    int ret = async_read_internal(h, buf, size > 10000 ? size / 2 : size, 0, NULL, NULL);
+    int ret = async_read_internal(h, buf, size, 0, NULL, NULL);
     AVTRACE(h, AV_LOG_ERROR, "async_read(%d)=%d at %d\n", size, ret, old_pos);
 
     return ret;
