@@ -297,7 +297,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     int64_t       new_logical_pos;
 
     if (whence == AVSEEK_SIZE) {
-        AVTRACE(h, AV_LOG_DEBUG, "async_seek: AVSEEK_SIZE\n");
+        AVTRACE(h, AV_LOG_DEBUG, "async_seek: AVSEEK_SIZE: %"PRId64"\n", (int64_t)c->logical_size);
         return c->logical_size;
     } if (whence == SEEK_CUR) {
         AVTRACE(h, AV_LOG_DEBUG, "async_seek: %"PRId64"\n", pos);
