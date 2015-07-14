@@ -123,7 +123,7 @@ static void *async_buffer_task(void *arg)
             continue;
         }
 
-        if (c->io_eof_reached || av_fifo_space(fifo) > 0) {
+        if (c->io_eof_reached || av_fifo_space(fifo) <= 0) {
             pthread_mutex_lock(&c->mutex);
             pthread_cond_signal(&c->cond_wakeup_main);
             pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
@@ -240,8 +240,8 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
 {
     Context      *c       = h->priv_data;
     AVFifoBuffer *fifo    = c->fifo;
-    int64_t       ret     = 0;
     int           to_read = size;
+    int           ret     = 0;
 
     pthread_mutex_lock(&c->mutex);
 
@@ -255,6 +255,7 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
             av_fifo_generic_read(fifo, dest, to_copy, NULL);
             c->logical_pos += to_copy;
             to_read        -= to_copy;
+            ret             = size - to_read;
 
             if (to_read <= 0 || !read_complete)
                 break;
