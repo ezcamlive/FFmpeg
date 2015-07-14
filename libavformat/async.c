@@ -250,9 +250,11 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
             ret = AVERROR_EXIT;
             break;
         }
-        int to_copy = FFMIN(to_read, av_fifo_size(fifo));
+        int fifo_size = av_fifo_size(fifo);
+        int to_copy   = FFMIN(to_read, fifo_size);
         if (to_copy > 0) {
             av_fifo_generic_read(fifo, dest, to_copy, NULL);
+            dest            = (uint8_t *)dest + to_copy;
             c->logical_pos += to_copy;
             to_read        -= to_copy;
             ret             = size - to_read;
@@ -309,15 +311,16 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     if (new_logical_pos < 0)
         return AVERROR(EINVAL);
 
+    int fifo_size = av_fifo_size(fifo);
     if (new_logical_pos == c->logical_pos) {
         /* current position */
         return c->logical_pos;
     } else if ((new_logical_pos > c->logical_pos) &&
-               (new_logical_pos < (c->logical_pos + av_fifo_size(fifo) + SHORT_SEEK_THRESHOLD))) {
+               (new_logical_pos < (c->logical_pos + fifo_size + SHORT_SEEK_THRESHOLD))) {
         /* fast seek */
         AVTRACE(h, AV_LOG_DEBUG, "async_seek: fask_seek %"PRId64" from %d dist:%d/%d\n",
                 new_logical_pos, (int)c->logical_pos,
-                (int)(new_logical_pos - c->logical_pos), av_fifo_size(fifo));
+                (int)(new_logical_pos - c->logical_pos), fifo_size);
         async_read_internal(h, NULL, new_logical_pos - c->logical_pos, 1, fifo_do_not_copy_func);
         return c->logical_pos;
     } else if (c->logical_size <= 0) {
