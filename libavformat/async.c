@@ -71,17 +71,16 @@ typedef struct Context {
     AVIOInterruptCB interrupt_callback;
 } Context;
 
-static int async_interrupt_callback(void *arg)
+static int async_check_interrupt(void *arg)
 {
-    URLContext *h   = arg;
-    Context    *c   = h->priv_data;
-    int         ret = 0;
+    URLContext *h = arg;
+    Context    *c = h->priv_data;
 
-    if (c->interrupt_callback.callback) {
-        ret = c->interrupt_callback.callback(c->interrupt_callback.opaque);
-        if (!ret)
-            return ret;
-    }
+    if (c->abort_request)
+        return 1;
+
+    if (ff_check_interrupt(&c->interrupt_callback))
+        c->abort_request = 1;
 
     return c->abort_request;
 }
@@ -96,15 +95,15 @@ static void *async_buffer_task(void *arg)
     while (1) {
         int fifo_space, to_copy;
 
-        if (async_interrupt_callback(h)) {
+        pthread_mutex_lock(&c->mutex);
+        if (async_check_interrupt(h)) {
             c->io_eof_reached = 1;
             c->io_error       = AVERROR_EXIT;
+            pthread_mutex_unlock(&c->mutex);
             break;
         }
 
         if (c->seek_request) {
-            pthread_mutex_lock(&c->mutex);
-
             ret = ffurl_seek(c->inner, c->seek_pos, c->seek_whence);
             if (ret < 0) {
                 c->io_eof_reached = 1;
@@ -121,32 +120,40 @@ static void *async_buffer_task(void *arg)
             av_fifo_reset(fifo);
 
             pthread_cond_signal(&c->cond_wakeup_main);
-            pthread_mutex_unlock(&c->mutex);
-            continue;
+            goto unlock_and_continue;
         }
 
         fifo_space = av_fifo_space(fifo);
         if (c->io_eof_reached || fifo_space <= 0) {
-            pthread_mutex_lock(&c->mutex);
             pthread_cond_signal(&c->cond_wakeup_main);
+            if (async_check_interrupt(h))
+                goto unlock_and_continue;
             pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
-            pthread_mutex_unlock(&c->mutex);
-            continue;
+            goto unlock_and_continue;
         }
+        pthread_mutex_unlock(&c->mutex);
 
+        /* unlocked area: begin */
         to_copy = FFMIN(4096, fifo_space);
         ret = av_fifo_generic_write(fifo, c->inner, to_copy, (void *)ffurl_read);
+        /* unlocked area: end */
+
+        pthread_mutex_lock(&c->mutex);
         if (ret <= 0) {
             c->io_eof_reached = 1;
             if (ret < 0) {
                 c->io_error = ret;
             }
         }
-
-        pthread_mutex_lock(&c->mutex);
         pthread_cond_signal(&c->cond_wakeup_main);
+unlock_and_continue:
         pthread_mutex_unlock(&c->mutex);
     }
+
+    pthread_mutex_lock(&c->mutex);
+    av_assert2(c->abort_request != 0);
+    pthread_cond_signal(&c->cond_wakeup_main);
+    pthread_mutex_unlock(&c->mutex);
 
     return NULL;
 }
@@ -155,7 +162,7 @@ static int async_open(URLContext *h, const char *arg, int flags, AVDictionary **
 {
     Context         *c = h->priv_data;
     int              ret;
-    AVIOInterruptCB  interrupt_callback = {.callback = async_interrupt_callback, .opaque = h};
+    AVIOInterruptCB  interrupt_callback = {.callback = async_check_interrupt, .opaque = h};
 
     av_strstart(arg, "async:", &arg);
 
@@ -251,7 +258,7 @@ static int async_read_internal(URLContext *h, void *dest, int size, int read_com
 
     while (to_read > 0) {
         int fifo_size, to_copy;
-        if (async_interrupt_callback(h)) {
+        if (async_check_interrupt(h)) {
             ret = AVERROR_EXIT;
             break;
         }
@@ -343,7 +350,7 @@ static int64_t async_seek(URLContext *h, int64_t pos, int whence)
     c->seek_ret       = 0;
 
     while (1) {
-        if (async_interrupt_callback(h)) {
+        if (async_check_interrupt(h)) {
             ret = AVERROR_EXIT;
             break;
         }
