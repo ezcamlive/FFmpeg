@@ -129,7 +129,8 @@ static void *async_buffer_task(void *arg)
         if (c->io_eof_reached || fifo_space <= 0) {
             pthread_mutex_lock(&c->mutex);
             pthread_cond_signal(&c->cond_wakeup_main);
-            pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
+            if (!async_interrupt_callback(h))
+                pthread_cond_wait(&c->cond_wakeup_background, &c->mutex);
             pthread_mutex_unlock(&c->mutex);
             continue;
         }
