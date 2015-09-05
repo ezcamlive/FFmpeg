@@ -1402,7 +1402,7 @@ int ff_h264_decode_slice_header(H264Context *h, H264SliceContext *sl)
     frame_num = get_bits(&sl->gb, h->sps.log2_max_frame_num);
     if (!first_slice) {
         if (h->frame_num != frame_num) {
-            av_log(h->avctx, AV_LOG_ERROR, "Frame num change from %d to %d\n",
+            av_log(h->avctx, AV_LOG_ERROR, "...........Frame num change from %d to %d\n",
                    h->frame_num, frame_num);
             return AVERROR_INVALIDDATA;
         }
